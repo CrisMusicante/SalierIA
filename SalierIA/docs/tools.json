@@ -1,0 +1,384 @@
+{
+  "tools": [
+    {
+      "name": "add_note",
+      "description": "Insert a single note into the active Sibelius score at a specific measure and beat position. Supports solfeo names (do, re, mi, fa, sol, la, si) and accidentals (sostenido, bemol). Duration names in Spanish: redonda, blanca, negra, corchea, semicorchea.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "pitch": {
+            "type": "string",
+            "description": "Note pitch in scientific notation: C, D, E, F, G, A, B with optional # or b, followed by octave number. E.g.: 'F#4', 'Bb3', 'C5'. Converted from solfeo by the parser layer before reaching this tool."
+          },
+          "duration": {
+            "type": "string",
+            "enum": ["whole", "half", "quarter", "eighth", "sixteenth", "thirty_second"],
+            "description": "Note duration value."
+          },
+          "measure": {
+            "type": "integer",
+            "description": "1-based measure number in the score.",
+            "minimum": 1
+          },
+          "beat": {
+            "type": "number",
+            "description": "Beat position within the measure. 1.0 = downbeat, 1.5 = halfway through beat 1, 2.0 = beat 2, etc.",
+            "minimum": 1.0
+          },
+          "staff": {
+            "type": "integer",
+            "description": "Staff number, 1-based. Default is 1 (top staff).",
+            "default": 1
+          },
+          "voice": {
+            "type": "integer",
+            "description": "Voice number 1–4. Default is 1.",
+            "default": 1,
+            "minimum": 1,
+            "maximum": 4
+          },
+          "dotted": {
+            "type": "boolean",
+            "description": "Whether the note is dotted (adds 50% to duration).",
+            "default": false
+          }
+        },
+        "required": ["pitch", "duration", "measure"]
+      }
+    },
+    {
+      "name": "add_chord",
+      "description": "Insert a chord (multiple simultaneous notes) at a specific position. All notes share the same duration and position.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "pitches": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Array of pitch strings in scientific notation. E.g.: ['C4', 'E4', 'G4'] for a C major chord.",
+            "minItems": 2
+          },
+          "duration": {
+            "type": "string",
+            "enum": ["whole", "half", "quarter", "eighth", "sixteenth"]
+          },
+          "measure": { "type": "integer", "minimum": 1 },
+          "beat": { "type": "number", "minimum": 1.0 },
+          "staff": { "type": "integer", "default": 1 },
+          "voice": { "type": "integer", "default": 1 }
+        },
+        "required": ["pitches", "duration", "measure"]
+      }
+    },
+    {
+      "name": "add_rest",
+      "description": "Insert a rest at a specific measure and beat position.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "duration": {
+            "type": "string",
+            "enum": ["whole", "half", "quarter", "eighth", "sixteenth"]
+          },
+          "measure": { "type": "integer", "minimum": 1 },
+          "beat": { "type": "number", "minimum": 1.0 },
+          "staff": { "type": "integer", "default": 1 },
+          "voice": { "type": "integer", "default": 1 }
+        },
+        "required": ["duration", "measure"]
+      }
+    },
+    {
+      "name": "set_dynamic",
+      "description": "Apply a dynamic marking (pp, p, mp, mf, f, ff, etc.) to a note or passage.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "dynamic": {
+            "type": "string",
+            "enum": ["pppp", "ppp", "pp", "p", "mp", "mf", "f", "ff", "fff", "ffff", "sfz", "sfp", "fp", "rf", "rfz", "fz"],
+            "description": "Dynamic marking to apply."
+          },
+          "measure": { "type": "integer", "minimum": 1 },
+          "beat": { "type": "number", "minimum": 1.0 },
+          "staff": { "type": "integer", "default": 1 }
+        },
+        "required": ["dynamic", "measure"]
+      }
+    },
+    {
+      "name": "set_articulation",
+      "description": "Apply an articulation marking to a note at the given position.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "articulation": {
+            "type": "string",
+            "enum": ["staccato", "tenuto", "accent", "marcato", "fermata", "trill", "mordent", "turn", "staccatissimo"],
+            "description": "Articulation type."
+          },
+          "measure": { "type": "integer", "minimum": 1 },
+          "beat": { "type": "number", "minimum": 1.0 },
+          "staff": { "type": "integer", "default": 1 },
+          "voice": { "type": "integer", "default": 1 }
+        },
+        "required": ["articulation", "measure", "beat"]
+      }
+    },
+    {
+      "name": "add_slur",
+      "description": "Add a slur or tie between two positions in the score.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "start_measure": { "type": "integer", "minimum": 1 },
+          "start_beat": { "type": "number", "minimum": 1.0 },
+          "end_measure": { "type": "integer", "minimum": 1 },
+          "end_beat": { "type": "number", "minimum": 1.0 },
+          "staff": { "type": "integer", "default": 1 },
+          "type": {
+            "type": "string",
+            "enum": ["slur", "tie"],
+            "default": "slur"
+          }
+        },
+        "required": ["start_measure", "start_beat", "end_measure", "end_beat"]
+      }
+    },
+    {
+      "name": "add_hairpin",
+      "description": "Add a crescendo or decrescendo hairpin between two positions.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["crescendo", "decrescendo"],
+            "description": "'crescendo' for < hairpin, 'decrescendo' for > hairpin."
+          },
+          "start_measure": { "type": "integer", "minimum": 1 },
+          "start_beat": { "type": "number", "minimum": 1.0 },
+          "end_measure": { "type": "integer", "minimum": 1 },
+          "end_beat": { "type": "number", "minimum": 1.0 },
+          "staff": { "type": "integer", "default": 1 }
+        },
+        "required": ["type", "start_measure", "start_beat", "end_measure", "end_beat"]
+      }
+    },
+    {
+      "name": "set_tempo",
+      "description": "Set or change the tempo at a specific measure.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "bpm": {
+            "type": "integer",
+            "description": "Beats per minute for quarter note.",
+            "minimum": 20,
+            "maximum": 400
+          },
+          "measure": {
+            "type": "integer",
+            "description": "Measure where the tempo change takes effect.",
+            "minimum": 1,
+            "default": 1
+          },
+          "text": {
+            "type": "string",
+            "description": "Optional tempo text label (e.g., 'Allegro', 'Andante', 'Moderato')."
+          }
+        },
+        "required": ["bpm"]
+      }
+    },
+    {
+      "name": "add_measures",
+      "description": "Insert new empty measures into the score at a given position.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "count": {
+            "type": "integer",
+            "description": "Number of measures to insert.",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "after_measure": {
+            "type": "integer",
+            "description": "Insert after this measure number. Use 0 to insert at the beginning.",
+            "minimum": 0
+          }
+        },
+        "required": ["count", "after_measure"]
+      }
+    },
+    {
+      "name": "delete_notes",
+      "description": "Delete notes or rests in a range of measures, optionally limited to a specific staff or voice.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "start_measure": { "type": "integer", "minimum": 1 },
+          "end_measure": { "type": "integer", "minimum": 1 },
+          "staff": {
+            "type": "integer",
+            "description": "If omitted, deletes from all staves.",
+            "default": null
+          },
+          "voice": {
+            "type": "integer",
+            "description": "If omitted, deletes from all voices.",
+            "default": null
+          }
+        },
+        "required": ["start_measure", "end_measure"]
+      }
+    },
+    {
+      "name": "get_score_info",
+      "description": "Read metadata and current state of the active Sibelius score: title, composer, key signature, time signature, number of measures, staves, and instruments.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "name": "set_key_signature",
+      "description": "Set or change the key signature at a specific measure.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "Key in standard notation: 'C', 'G', 'D', 'A', 'E', 'B', 'F#', 'Db', 'Ab', 'Eb', 'Bb', 'F'. Append 'm' for minor: 'Am', 'Em', 'Dm', etc."
+          },
+          "measure": {
+            "type": "integer",
+            "description": "Measure where the key change takes effect.",
+            "minimum": 1,
+            "default": 1
+          }
+        },
+        "required": ["key"]
+      }
+    },
+    {
+      "name": "set_time_signature",
+      "description": "Set or change the time signature at a specific measure.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "numerator": {
+            "type": "integer",
+            "description": "Top number of the time signature.",
+            "minimum": 1
+          },
+          "denominator": {
+            "type": "integer",
+            "enum": [1, 2, 4, 8, 16, 32],
+            "description": "Bottom number of the time signature."
+          },
+          "measure": { "type": "integer", "minimum": 1, "default": 1 }
+        },
+        "required": ["numerator", "denominator"]
+      }
+    },
+    {
+      "name": "add_text",
+      "description": "Add a text expression to the score (rehearsal marks, technique instructions, lyrics, etc.).",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "The text content to add."
+          },
+          "text_style": {
+            "type": "string",
+            "enum": ["expression", "technique", "tempo", "rehearsal_mark", "lyrics_verse_1", "lyrics_verse_2"],
+            "description": "Sibelius text style to use."
+          },
+          "measure": { "type": "integer", "minimum": 1 },
+          "beat": { "type": "number", "minimum": 1.0 },
+          "staff": { "type": "integer", "default": 1 }
+        },
+        "required": ["text", "text_style", "measure"]
+      }
+    },
+    {
+      "name": "export_score",
+      "description": "Export the current score to a file format. Supports MusicXML, PDF, MIDI, and audio.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "format": {
+            "type": "string",
+            "enum": ["musicxml", "pdf", "midi", "mp3", "wav"],
+            "description": "Export format."
+          },
+          "output_path": {
+            "type": "string",
+            "description": "Absolute Windows path for the output file. E.g.: 'C:\\\\Users\\\\Usuario\\\\Desktop\\\\partitura.pdf'. If omitted, saves to Desktop."
+          }
+        },
+        "required": ["format"]
+      }
+    },
+    {
+      "name": "undo",
+      "description": "Undo the last N operations in Sibelius.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "steps": {
+            "type": "integer",
+            "description": "Number of undo steps. Default is 1.",
+            "minimum": 1,
+            "default": 1
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "select_passage",
+      "description": "Select a passage in the score (equivalent to clicking and shift-clicking). Required before some operations like copy, transpose, or apply plugin.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "start_measure": { "type": "integer", "minimum": 1 },
+          "start_beat": { "type": "number", "minimum": 1.0, "default": 1.0 },
+          "end_measure": { "type": "integer", "minimum": 1 },
+          "end_beat": { "type": "number", "minimum": 1.0 },
+          "all_staves": {
+            "type": "boolean",
+            "description": "If true, selects across all staves. If false, only selects the specified staff.",
+            "default": true
+          },
+          "staff": { "type": "integer", "default": 1 }
+        },
+        "required": ["start_measure", "end_measure"]
+      }
+    },
+    {
+      "name": "transpose_passage",
+      "description": "Transpose the currently selected passage by a given interval.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "interval": {
+            "type": "string",
+            "description": "Interval name: 'P5', 'M3', 'm3', 'P8', 'M2', 'm2', etc. Prefix with '-' for downward: '-M3'."
+          },
+          "chromatic": {
+            "type": "boolean",
+            "description": "If true, transposes chromatically (preserving note names). If false, transposes diatonically.",
+            "default": true
+          }
+        },
+        "required": ["interval"]
+      }
+    }
+  ]
+}

@@ -1,0 +1,1314 @@
+{
+  PluginName "VoiceAgentBridge"
+  Author "SalierIA"
+  Version "1.0"
+  Description "Bridges Python voice agent commands to Sibelius via JSON files."
+
+  // ─────────────────────────────────────────────────────────
+  // Plugin-level state
+  // ─────────────────────────────────────────────────────────
+  string gBridgeDir;
+  string gCmdPath;
+  string gRespPath;
+  string gLastCmdId;
+
+  // ─────────────────────────────────────────────────────────
+  // Initialize – called once when the plugin is loaded
+  // ─────────────────────────────────────────────────────────
+  Initialize
+  {
+    gBridgeDir = Sibelius.GetEnvironmentVariable("SVA_BRIDGE_DIR");
+    if gBridgeDir = "" {
+      gBridgeDir = Sibelius.GetEnvironmentVariable("TEMP");
+      if gBridgeDir = "" {
+        gBridgeDir = "C:\\Temp\\salier_bridge";
+      }
+    }
+    // Normalise trailing slash
+    int dlen;
+    dlen = Length(gBridgeDir);
+    if dlen > 0 {
+      string lastChar;
+      lastChar = Mid(gBridgeDir, dlen - 1, 1);
+      if (lastChar != "\\") and (lastChar != "/") {
+        gBridgeDir = gBridgeDir & "\\";
+      }
+    }
+    gCmdPath  = gBridgeDir & "agent_cmd.json";
+    gRespPath = gBridgeDir & "agent_resp.json";
+    gLastCmdId = "";
+    Sibelius.SetTimerAction(500, "OnTimer");
+  } // Initialize
+
+  // ─────────────────────────────────────────────────────────
+  // OnTimer – polls the command file every 500 ms
+  // ─────────────────────────────────────────────────────────
+  OnTimer
+  {
+    string raw;
+    raw = Sibelius.ReadTextFile(gCmdPath);
+    if raw = "" { return; }
+
+    string cmdId;
+    cmdId = ExtractStringField(raw, "cmd_id");
+    if cmdId = "" { return; }
+    if cmdId = gLastCmdId { return; }
+
+    gLastCmdId = cmdId;
+
+    string tool;
+    tool = ExtractStringField(raw, "tool");
+
+    string resp;
+    resp = DispatchTool(cmdId, tool, raw);
+
+    Sibelius.SaveTextFile(gRespPath, resp);
+  } // OnTimer
+
+  // ─────────────────────────────────────────────────────────
+  // DispatchTool – routes to the correct handler
+  // ─────────────────────────────────────────────────────────
+  string DispatchTool(string cmdId, string tool, string raw)
+  {
+    if tool = "add_note"           { return DoAddNote(cmdId, raw); }
+    if tool = "add_chord"          { return DoAddChord(cmdId, raw); }
+    if tool = "add_rest"           { return DoAddRest(cmdId, raw); }
+    if tool = "set_dynamic"        { return DoSetDynamic(cmdId, raw); }
+    if tool = "set_articulation"   { return DoSetArticulation(cmdId, raw); }
+    if tool = "add_slur"           { return DoAddSlur(cmdId, raw); }
+    if tool = "add_hairpin"        { return DoAddHairpin(cmdId, raw); }
+    if tool = "set_tempo"          { return DoSetTempo(cmdId, raw); }
+    if tool = "add_measures"       { return DoAddMeasures(cmdId, raw); }
+    if tool = "delete_notes"       { return DoDeleteNotes(cmdId, raw); }
+    if tool = "get_score_info"     { return DoGetScoreInfo(cmdId); }
+    if tool = "set_key_signature"  { return DoSetKeySignature(cmdId, raw); }
+    if tool = "set_time_signature" { return DoSetTimeSignature(cmdId, raw); }
+    if tool = "add_text"           { return DoAddText(cmdId, raw); }
+    if tool = "export_score"       { return DoExportScore(cmdId, raw); }
+    if tool = "undo"               { return DoUndo(cmdId, raw); }
+    if tool = "select_passage"     { return DoSelectPassage(cmdId, raw); }
+    if tool = "transpose_passage"  { return DoTransposePassage(cmdId, raw); }
+    return BuildResponse(cmdId, "error", "Unknown tool: " & tool, "UNKNOWN_TOOL");
+  } // DispatchTool
+
+  // ─────────────────────────────────────────────────────────
+  // Helper: PitchToMidi
+  //   Converts 'C4' -> 60, 'F#4' -> 66, 'Bb3' -> 58
+  //   Supports accidentals # and b (single only).
+  // ─────────────────────────────────────────────────────────
+  int PitchToMidi(string pitch)
+  {
+    if Length(pitch) < 2 { return -1; }
+
+    string letter;
+    letter = Mid(pitch, 0, 1);
+
+    int baseNote;
+    if letter = "C" { baseNote = 0; }
+    else if letter = "D" { baseNote = 2; }
+    else if letter = "E" { baseNote = 4; }
+    else if letter = "F" { baseNote = 5; }
+    else if letter = "G" { baseNote = 7; }
+    else if letter = "A" { baseNote = 9; }
+    else if letter = "B" { baseNote = 11; }
+    else { return -1; }
+
+    int accidentalOffset;
+    accidentalOffset = 0;
+    int octaveStart;
+    octaveStart = 1;
+
+    if Length(pitch) >= 3 {
+      string acc;
+      acc = Mid(pitch, 1, 1);
+      if acc = "#" { accidentalOffset = 1;  octaveStart = 2; }
+      else if acc = "b" { accidentalOffset = -1; octaveStart = 2; }
+    }
+
+    string octaveStr;
+    octaveStr = Mid(pitch, octaveStart, Length(pitch) - octaveStart);
+    int octave;
+    octave = StringToInt(octaveStr);
+
+    // MIDI = 12*(octave+1) + baseNote + accidentalOffset   (C4=60 => octave=4)
+    int midi;
+    midi = (12 * (octave + 1)) + baseNote + accidentalOffset;
+    return midi;
+  } // PitchToMidi
+
+  // ─────────────────────────────────────────────────────────
+  // Helper: DurationCode
+  //   Maps English duration name to Sibelius duration integer.
+  //   whole=64, half=32, quarter=16, eighth=8, sixteenth=4,
+  //   thirty_second=2
+  // ─────────────────────────────────────────────────────────
+  int DurationCode(string dur)
+  {
+    if dur = "whole"        { return 64; }
+    if dur = "half"         { return 32; }
+    if dur = "quarter"      { return 16; }
+    if dur = "eighth"       { return 8;  }
+    if dur = "sixteenth"    { return 4;  }
+    if dur = "thirty_second"{ return 2;  }
+    // default quarter
+    return 16;
+  } // DurationCode
+
+  // ─────────────────────────────────────────────────────────
+  // Helper: KeyStringToIndex
+  //   Maps key name to Sibelius key index.
+  //   Major: C=0, G=1, D=2, A=3, E=4, B=5, F#=6, Cb=-7,
+  //          F=-1, Bb=-2, Eb=-3, Ab=-4, Db=-5, Gb=-6
+  //   Minor: add 'minor' offset -> Am=0, Em=1, Bm=2, F#m=3,
+  //          C#m=4, G#m=5, D#m=6, Dm=-1, Gm=-2, Cm=-3,
+  //          Fm=-4, Bbm=-5, Ebm=-6
+  //   Sibelius uses positive = sharps, negative = flats.
+  //   Minor keys share the same accidental count but Sibelius
+  //   distinguishes via a 'minor' flag; we encode as index+100
+  //   so callers can detect minor.
+  // ─────────────────────────────────────────────────────────
+  int KeyStringToIndex(string key)
+  {
+    // Major keys
+    if key = "C"  { return 0;  }
+    if key = "G"  { return 1;  }
+    if key = "D"  { return 2;  }
+    if key = "A"  { return 3;  }
+    if key = "E"  { return 4;  }
+    if key = "B"  { return 5;  }
+    if key = "F#" { return 6;  }
+    if key = "Cb" { return -7; }
+    if key = "F"  { return -1; }
+    if key = "Bb" { return -2; }
+    if key = "Eb" { return -3; }
+    if key = "Ab" { return -4; }
+    if key = "Db" { return -5; }
+    if key = "Gb" { return -6; }
+    // Minor keys (offset 100 = minor flag)
+    if key = "Am"  { return 100 + 0;  }
+    if key = "Em"  { return 100 + 1;  }
+    if key = "Bm"  { return 100 + 2;  }
+    if key = "F#m" { return 100 + 3;  }
+    if key = "C#m" { return 100 + 4;  }
+    if key = "G#m" { return 100 + 5;  }
+    if key = "D#m" { return 100 + 6;  }
+    if key = "Dm"  { return 100 - 1;  }
+    if key = "Gm"  { return 100 - 2;  }
+    if key = "Cm"  { return 100 - 3;  }
+    if key = "Fm"  { return 100 - 4;  }
+    if key = "Bbm" { return 100 - 5;  }
+    if key = "Ebm" { return 100 - 6;  }
+    return 0; // default C major
+  } // KeyStringToIndex
+
+  // ─────────────────────────────────────────────────────────
+  // Helper: IntervalSemitones
+  //   P1=0, m2=1, M2=2, m3=3, M3=4, P4=5, d5=6, P5=7,
+  //   m6=8, M6=9, m7=10, M7=11, P8=12
+  //   Prefix '-' for downward (not standard notation but
+  //   used here for simplicity).
+  // ─────────────────────────────────────────────────────────
+  int IntervalSemitones(string interval)
+  {
+    int sign;
+    sign = 1;
+    string iv;
+    iv = interval;
+    if Length(iv) > 0 {
+      if Mid(iv, 0, 1) = "-" {
+        sign = -1;
+        iv = Mid(iv, 1, Length(iv) - 1);
+      }
+    }
+    int semis;
+    if iv = "P1"  { semis = 0;  }
+    else if iv = "m2"  { semis = 1;  }
+    else if iv = "M2"  { semis = 2;  }
+    else if iv = "m3"  { semis = 3;  }
+    else if iv = "M3"  { semis = 4;  }
+    else if iv = "P4"  { semis = 5;  }
+    else if iv = "d5"  { semis = 6;  }
+    else if iv = "A4"  { semis = 6;  }
+    else if iv = "P5"  { semis = 7;  }
+    else if iv = "m6"  { semis = 8;  }
+    else if iv = "M6"  { semis = 9;  }
+    else if iv = "m7"  { semis = 10; }
+    else if iv = "M7"  { semis = 11; }
+    else if iv = "P8"  { semis = 12; }
+    else { semis = 0; }
+    return sign * semis;
+  } // IntervalSemitones
+
+  // ─────────────────────────────────────────────────────────
+  // JSON helpers
+  // ─────────────────────────────────────────────────────────
+
+  // ExtractStringField: finds "fieldName":"value" in json
+  string ExtractStringField(string json, string fieldName)
+  {
+    string needle;
+    needle = "\"" & fieldName & "\":\"";
+    int pos;
+    pos = Pos(needle, json);
+    if pos < 0 { return ""; }
+    int start;
+    start = pos + Length(needle);
+    // find closing quote, skipping escaped quotes
+    int i;
+    i = start;
+    string result;
+    result = "";
+    while i < Length(json) {
+      string ch;
+      ch = Mid(json, i, 1);
+      if ch = "\\" {
+        // escaped character – include both chars
+        i = i + 1;
+        if i < Length(json) {
+          result = result & Mid(json, i, 1);
+        }
+      } else if ch = "\"" {
+        // end of string value
+        return result;
+      } else {
+        result = result & ch;
+      }
+      i = i + 1;
+    }
+    return result;
+  } // ExtractStringField
+
+  // ExtractIntField: finds "fieldName":123 in json
+  int ExtractIntField(string json, string fieldName)
+  {
+    string needle;
+    needle = "\"" & fieldName & "\":";
+    int pos;
+    pos = Pos(needle, json);
+    if pos < 0 { return 0; }
+    int start;
+    start = pos + Length(needle);
+    // skip whitespace
+    while start < Length(json) {
+      string ch;
+      ch = Mid(json, start, 1);
+      if (ch != " ") and (ch != "\t") { break; }
+      start = start + 1;
+    }
+    // collect digits (and optional leading minus)
+    string numStr;
+    numStr = "";
+    int j;
+    j = start;
+    while j < Length(json) {
+      string c;
+      c = Mid(json, j, 1);
+      if (c >= "0" and c <= "9") or (c = "-" and j = start) {
+        numStr = numStr & c;
+      } else {
+        break;
+      }
+      j = j + 1;
+    }
+    if numStr = "" { return 0; }
+    return StringToInt(numStr);
+  } // ExtractIntField
+
+  // ExtractFloatField: finds "fieldName":1.5 in json, returns as int*100
+  // (ManuScript has no float type; we return bpm as int rounded)
+  int ExtractFloatField(string json, string fieldName)
+  {
+    string needle;
+    needle = "\"" & fieldName & "\":";
+    int pos;
+    pos = Pos(needle, json);
+    if pos < 0 { return 0; }
+    int start;
+    start = pos + Length(needle);
+    while start < Length(json) {
+      string ch;
+      ch = Mid(json, start, 1);
+      if (ch != " ") and (ch != "\t") { break; }
+      start = start + 1;
+    }
+    string numStr;
+    numStr = "";
+    int j;
+    j = start;
+    while j < Length(json) {
+      string c;
+      c = Mid(json, j, 1);
+      if (c >= "0" and c <= "9") or (c = "." ) or (c = "-" and j = start) {
+        numStr = numStr & c;
+      } else {
+        break;
+      }
+      j = j + 1;
+    }
+    if numStr = "" { return 0; }
+    // Simple integer parse (truncate at decimal point)
+    int dotPos;
+    dotPos = Pos(".", numStr);
+    if dotPos >= 0 {
+      numStr = Mid(numStr, 0, dotPos);
+    }
+    return StringToInt(numStr);
+  } // ExtractFloatField
+
+  // ExtractArrayField: returns raw JSON array string for a given field key
+  string ExtractArrayField(string json, string fieldName)
+  {
+    string needle;
+    needle = "\"" & fieldName & "\":[";
+    int pos;
+    pos = Pos(needle, json);
+    if pos < 0 { return ""; }
+    int start;
+    start = pos + Length(needle) - 1; // points at '['
+    int depth;
+    depth = 0;
+    int i;
+    i = start;
+    string result;
+    result = "";
+    while i < Length(json) {
+      string ch;
+      ch = Mid(json, i, 1);
+      if ch = "[" { depth = depth + 1; }
+      if ch = "]" {
+        depth = depth - 1;
+        result = result & ch;
+        if depth = 0 { return result; }
+        i = i + 1;
+        continue;
+      }
+      result = result & ch;
+      i = i + 1;
+    }
+    return result;
+  } // ExtractArrayField
+
+  // ExtractNthStringFromArray: given array string like ["C4","E4","G4"]
+  // returns the nth element (0-indexed)
+  string ExtractNthStringFromArray(string arr, int n)
+  {
+    // Strip leading '[' and trailing ']'
+    string inner;
+    inner = arr;
+    if Length(inner) >= 2 {
+      inner = Mid(inner, 1, Length(inner) - 2);
+    }
+    int count;
+    count = 0;
+    int i;
+    i = 0;
+    while i < Length(inner) {
+      // skip whitespace and commas
+      string ch;
+      ch = Mid(inner, i, 1);
+      if ch = "\"" {
+        // read string element
+        int j;
+        j = i + 1;
+        string elem;
+        elem = "";
+        while j < Length(inner) {
+          string c;
+          c = Mid(inner, j, 1);
+          if c = "\"" { break; }
+          elem = elem & c;
+          j = j + 1;
+        }
+        if count = n { return elem; }
+        count = count + 1;
+        i = j + 1;
+      } else {
+        i = i + 1;
+      }
+    }
+    return "";
+  } // ExtractNthStringFromArray
+
+  // CountStringArrayElements: count items in a JSON string array
+  int CountStringArrayElements(string arr)
+  {
+    string inner;
+    inner = arr;
+    if Length(inner) >= 2 {
+      inner = Mid(inner, 1, Length(inner) - 2);
+    }
+    int count;
+    count = 0;
+    int i;
+    i = 0;
+    while i < Length(inner) {
+      string ch;
+      ch = Mid(inner, i, 1);
+      if ch = "\"" {
+        int j;
+        j = i + 1;
+        while j < Length(inner) {
+          string c;
+          c = Mid(inner, j, 1);
+          if c = "\"" { break; }
+          j = j + 1;
+        }
+        count = count + 1;
+        i = j + 1;
+      } else {
+        i = i + 1;
+      }
+    }
+    return count;
+  } // CountStringArrayElements
+
+  // BuildResponse: assembles the response JSON string
+  string BuildResponse(string cmdId, string status, string message, string errorCode)
+  {
+    string errVal;
+    if errorCode = "" or errorCode = "null" {
+      errVal = "null";
+    } else {
+      errVal = "\"" & errorCode & "\"";
+    }
+    string resp;
+    resp = "{\"cmd_id\":\"" & cmdId & "\","
+         & "\"status\":\"" & status & "\","
+         & "\"message\":\"" & message & "\","
+         & "\"error_code\":" & errVal & "}";
+    return resp;
+  } // BuildResponse
+
+  // ─────────────────────────────────────────────────────────
+  // Tool: add_note
+  // ─────────────────────────────────────────────────────────
+  string DoAddNote(string cmdId, string raw)
+  {
+    int measureNum;
+    measureNum = ExtractIntField(raw, "measure");
+    int staffNum;
+    staffNum = ExtractIntField(raw, "staff");
+    if staffNum <= 0 { staffNum = 1; }
+    string pitchStr;
+    pitchStr = ExtractStringField(raw, "pitch");
+    string durStr;
+    durStr = ExtractStringField(raw, "duration");
+
+    int midiPitch;
+    midiPitch = PitchToMidi(pitchStr);
+    if midiPitch < 0 {
+      return BuildResponse(cmdId, "error", "Invalid pitch: " & pitchStr, "INVALID_PITCH");
+    }
+    int dur;
+    dur = DurationCode(durStr);
+
+    Score score;
+    score = Sibelius.CurrentScore;
+    if score = null {
+      return BuildResponse(cmdId, "error", "No score open", "NO_SCORE");
+    }
+
+    Staff staff;
+    staff = score.NthStaff(staffNum - 1);
+    if staff = null {
+      return BuildResponse(cmdId, "error", "Staff " & staffNum & " not found", "INVALID_STAFF");
+    }
+
+    Bar bar;
+    bar = staff.NthBar(measureNum - 1);
+    if bar = null {
+      return BuildResponse(cmdId, "error", "Measure " & measureNum & " not found", "INVALID_MEASURE");
+    }
+
+    NoteInput ni;
+    ni = score.NoteInput;
+    ni.Staff = staff;
+    ni.Bar = bar;
+    ni.Duration = dur;
+    ni.AddNote(midiPitch);
+
+    return BuildResponse(cmdId, "ok", "Note " & pitchStr & " added at measure " & measureNum, "null");
+  } // DoAddNote
+
+  // ─────────────────────────────────────────────────────────
+  // Tool: add_chord
+  // ─────────────────────────────────────────────────────────
+  string DoAddChord(string cmdId, string raw)
+  {
+    int measureNum;
+    measureNum = ExtractIntField(raw, "measure");
+    int staffNum;
+    staffNum = ExtractIntField(raw, "staff");
+    if staffNum <= 0 { staffNum = 1; }
+    string durStr;
+    durStr = ExtractStringField(raw, "duration");
+    int dur;
+    dur = DurationCode(durStr);
+
+    string pitchesArr;
+    pitchesArr = ExtractArrayField(raw, "pitches");
+    if pitchesArr = "" {
+      return BuildResponse(cmdId, "error", "No pitches array provided", "MISSING_PARAM");
+    }
+
+    int pitchCount;
+    pitchCount = CountStringArrayElements(pitchesArr);
+    if pitchCount = 0 {
+      return BuildResponse(cmdId, "error", "Empty pitches array", "MISSING_PARAM");
+    }
+
+    Score score;
+    score = Sibelius.CurrentScore;
+    if score = null {
+      return BuildResponse(cmdId, "error", "No score open", "NO_SCORE");
+    }
+
+    Staff staff;
+    staff = score.NthStaff(staffNum - 1);
+    if staff = null {
+      return BuildResponse(cmdId, "error", "Staff " & staffNum & " not found", "INVALID_STAFF");
+    }
+
+    Bar bar;
+    bar = staff.NthBar(measureNum - 1);
+    if bar = null {
+      return BuildResponse(cmdId, "error", "Measure " & measureNum & " not found", "INVALID_MEASURE");
+    }
+
+    NoteInput ni;
+    ni = score.NoteInput;
+    ni.Staff = staff;
+    ni.Bar = bar;
+    ni.Duration = dur;
+
+    int i;
+    for i = 0 to pitchCount - 1 {
+      string pitchStr;
+      pitchStr = ExtractNthStringFromArray(pitchesArr, i);
+      int midiPitch;
+      midiPitch = PitchToMidi(pitchStr);
+      if midiPitch >= 0 {
+        if i = 0 {
+          ni.AddNote(midiPitch);
+        } else {
+          ni.AddNote(midiPitch);  // Sibelius adds to chord when position not advanced
+        }
+      }
+    }
+
+    return BuildResponse(cmdId, "ok", "Chord added at measure " & measureNum & " (" & pitchCount & " notes)", "null");
+  } // DoAddChord
+
+  // ─────────────────────────────────────────────────────────
+  // Tool: add_rest
+  // ─────────────────────────────────────────────────────────
+  string DoAddRest(string cmdId, string raw)
+  {
+    int measureNum;
+    measureNum = ExtractIntField(raw, "measure");
+    int staffNum;
+    staffNum = ExtractIntField(raw, "staff");
+    if staffNum <= 0 { staffNum = 1; }
+    string durStr;
+    durStr = ExtractStringField(raw, "duration");
+    int dur;
+    dur = DurationCode(durStr);
+
+    Score score;
+    score = Sibelius.CurrentScore;
+    if score = null {
+      return BuildResponse(cmdId, "error", "No score open", "NO_SCORE");
+    }
+
+    Staff staff;
+    staff = score.NthStaff(staffNum - 1);
+    if staff = null {
+      return BuildResponse(cmdId, "error", "Staff " & staffNum & " not found", "INVALID_STAFF");
+    }
+
+    Bar bar;
+    bar = staff.NthBar(measureNum - 1);
+    if bar = null {
+      return BuildResponse(cmdId, "error", "Measure " & measureNum & " not found", "INVALID_MEASURE");
+    }
+
+    NoteInput ni;
+    ni = score.NoteInput;
+    ni.Staff = staff;
+    ni.Bar = bar;
+    ni.Duration = dur;
+    ni.AddRest();
+
+    return BuildResponse(cmdId, "ok", "Rest added at measure " & measureNum, "null");
+  } // DoAddRest
+
+  // ─────────────────────────────────────────────────────────
+  // Tool: set_dynamic
+  // ─────────────────────────────────────────────────────────
+  string DoSetDynamic(string cmdId, string raw)
+  {
+    int measureNum;
+    measureNum = ExtractIntField(raw, "measure");
+    int beatNum;
+    beatNum = ExtractIntField(raw, "beat");
+    if beatNum <= 0 { beatNum = 1; }
+    int staffNum;
+    staffNum = ExtractIntField(raw, "staff");
+    if staffNum <= 0 { staffNum = 1; }
+    string dynStr;
+    dynStr = ExtractStringField(raw, "dynamic");
+
+    Score score;
+    score = Sibelius.CurrentScore;
+    if score = null {
+      return BuildResponse(cmdId, "error", "No score open", "NO_SCORE");
+    }
+
+    Staff staff;
+    staff = score.NthStaff(staffNum - 1);
+    if staff = null {
+      return BuildResponse(cmdId, "error", "Staff " & staffNum & " not found", "INVALID_STAFF");
+    }
+
+    Bar bar;
+    bar = staff.NthBar(measureNum - 1);
+    if bar = null {
+      return BuildResponse(cmdId, "error", "Measure " & measureNum & " not found", "INVALID_MEASURE");
+    }
+
+    // Position in ticks: beat offset (beat 1 = position 0, beat 2 = 256, etc. for 4/4 quarter=256)
+    int position;
+    position = (beatNum - 1) * 256;
+
+    Dynamic dyn;
+    dyn = score.NewDynamic(dynStr);
+    if dyn = null {
+      return BuildResponse(cmdId, "error", "Could not create dynamic: " & dynStr, "DYNAMIC_FAILED");
+    }
+    bar.AddBarObject(dyn, position, staff);
+
+    return BuildResponse(cmdId, "ok", "Dynamic " & dynStr & " set at measure " & measureNum & " beat " & beatNum, "null");
+  } // DoSetDynamic
+
+  // ─────────────────────────────────────────────────────────
+  // Tool: set_articulation
+  // ─────────────────────────────────────────────────────────
+  string DoSetArticulation(string cmdId, string raw)
+  {
+    int measureNum;
+    measureNum = ExtractIntField(raw, "measure");
+    int beatNum;
+    beatNum = ExtractIntField(raw, "beat");
+    if beatNum <= 0 { beatNum = 1; }
+    int staffNum;
+    staffNum = ExtractIntField(raw, "staff");
+    if staffNum <= 0 { staffNum = 1; }
+    string artStr;
+    artStr = ExtractStringField(raw, "articulation");
+
+    // Map articulation name to Sibelius NoteHead constant
+    int artId;
+    if artStr = "staccato"  { artId = NoteHead.Staccato;  }
+    else if artStr = "tenuto"    { artId = NoteHead.Tenuto;    }
+    else if artStr = "accent"    { artId = NoteHead.Accent;    }
+    else if artStr = "marcato"   { artId = NoteHead.Marcato;   }
+    else if artStr = "fermata"   { artId = NoteHead.Fermata;   }
+    else {
+      return BuildResponse(cmdId, "error", "Unknown articulation: " & artStr, "UNKNOWN_ARTICULATION");
+    }
+
+    Score score;
+    score = Sibelius.CurrentScore;
+    if score = null {
+      return BuildResponse(cmdId, "error", "No score open", "NO_SCORE");
+    }
+
+    Staff staff;
+    staff = score.NthStaff(staffNum - 1);
+    if staff = null {
+      return BuildResponse(cmdId, "error", "Staff " & staffNum & " not found", "INVALID_STAFF");
+    }
+
+    Bar bar;
+    bar = staff.NthBar(measureNum - 1);
+    if bar = null {
+      return BuildResponse(cmdId, "error", "Measure " & measureNum & " not found", "INVALID_MEASURE");
+    }
+
+    int position;
+    position = (beatNum - 1) * 256;
+
+    // Walk bar objects to find the note/chord at that beat position
+    BarObject obj;
+    for each obj in bar {
+      if obj.Type = "NoteRest" {
+        if obj.Position = position {
+          NoteRest nr;
+          nr = obj;
+          nr.Articulation(artId) = True;
+          return BuildResponse(cmdId, "ok", "Articulation " & artStr & " applied", "null");
+        }
+      }
+    }
+
+    return BuildResponse(cmdId, "error", "No note found at measure " & measureNum & " beat " & beatNum, "NOTE_NOT_FOUND");
+  } // DoSetArticulation
+
+  // ─────────────────────────────────────────────────────────
+  // Tool: add_slur
+  // ─────────────────────────────────────────────────────────
+  string DoAddSlur(string cmdId, string raw)
+  {
+    int startMeasure;
+    startMeasure = ExtractIntField(raw, "start_measure");
+    int startBeat;
+    startBeat = ExtractIntField(raw, "start_beat");
+    if startBeat <= 0 { startBeat = 1; }
+    int endMeasure;
+    endMeasure = ExtractIntField(raw, "end_measure");
+    int endBeat;
+    endBeat = ExtractIntField(raw, "end_beat");
+    if endBeat <= 0 { endBeat = 1; }
+    int staffNum;
+    staffNum = ExtractIntField(raw, "staff");
+    if staffNum <= 0 { staffNum = 1; }
+
+    Score score;
+    score = Sibelius.CurrentScore;
+    if score = null {
+      return BuildResponse(cmdId, "error", "No score open", "NO_SCORE");
+    }
+
+    Staff staff;
+    staff = score.NthStaff(staffNum - 1);
+    if staff = null {
+      return BuildResponse(cmdId, "error", "Staff " & staffNum & " not found", "INVALID_STAFF");
+    }
+
+    Bar startBar;
+    startBar = staff.NthBar(startMeasure - 1);
+    Bar endBar;
+    endBar = staff.NthBar(endMeasure - 1);
+
+    if startBar = null or endBar = null {
+      return BuildResponse(cmdId, "error", "Invalid measure range", "INVALID_MEASURE");
+    }
+
+    int startPos;
+    startPos = (startBeat - 1) * 256;
+    int endPos;
+    endPos = (endBeat - 1) * 256;
+
+    // Select the passage then create slur
+    score.Selection.SelectPassage(startBar, startPos, endBar, endPos, staff, staff);
+    score.CreateSlur();
+
+    return BuildResponse(cmdId, "ok", "Slur added from measure " & startMeasure & " to " & endMeasure, "null");
+  } // DoAddSlur
+
+  // ─────────────────────────────────────────────────────────
+  // Tool: add_hairpin
+  // ─────────────────────────────────────────────────────────
+  string DoAddHairpin(string cmdId, string raw)
+  {
+    int startMeasure;
+    startMeasure = ExtractIntField(raw, "start_measure");
+    int startBeat;
+    startBeat = ExtractIntField(raw, "start_beat");
+    if startBeat <= 0 { startBeat = 1; }
+    int endMeasure;
+    endMeasure = ExtractIntField(raw, "end_measure");
+    int endBeat;
+    endBeat = ExtractIntField(raw, "end_beat");
+    if endBeat <= 0 { endBeat = 1; }
+    int staffNum;
+    staffNum = ExtractIntField(raw, "staff");
+    if staffNum <= 0 { staffNum = 1; }
+    string hpType;
+    hpType = ExtractStringField(raw, "type");  // "crescendo" or "decrescendo"
+
+    Score score;
+    score = Sibelius.CurrentScore;
+    if score = null {
+      return BuildResponse(cmdId, "error", "No score open", "NO_SCORE");
+    }
+
+    Staff staff;
+    staff = score.NthStaff(staffNum - 1);
+    if staff = null {
+      return BuildResponse(cmdId, "error", "Staff " & staffNum & " not found", "INVALID_STAFF");
+    }
+
+    Bar startBar;
+    startBar = staff.NthBar(startMeasure - 1);
+    Bar endBar;
+    endBar = staff.NthBar(endMeasure - 1);
+
+    if startBar = null or endBar = null {
+      return BuildResponse(cmdId, "error", "Invalid measure range", "INVALID_MEASURE");
+    }
+
+    int startPos;
+    startPos = (startBeat - 1) * 256;
+    int endPos;
+    endPos = (endBeat - 1) * 256;
+
+    score.Selection.SelectPassage(startBar, startPos, endBar, endPos, staff, staff);
+
+    if hpType = "crescendo" {
+      score.CreateCrescendo();
+    } else {
+      score.CreateDecrescendo();
+    }
+
+    return BuildResponse(cmdId, "ok", "Hairpin (" & hpType & ") added from measure " & startMeasure & " to " & endMeasure, "null");
+  } // DoAddHairpin
+
+  // ─────────────────────────────────────────────────────────
+  // Tool: set_tempo
+  // ─────────────────────────────────────────────────────────
+  string DoSetTempo(string cmdId, string raw)
+  {
+    int bpm;
+    bpm = ExtractFloatField(raw, "bpm");
+    if bpm <= 0 { bpm = 120; }
+    int measureNum;
+    measureNum = ExtractIntField(raw, "measure");
+    if measureNum <= 0 { measureNum = 1; }
+    string label;
+    label = ExtractStringField(raw, "text");
+
+    Score score;
+    score = Sibelius.CurrentScore;
+    if score = null {
+      return BuildResponse(cmdId, "error", "No score open", "NO_SCORE");
+    }
+
+    score.SetTempo(bpm, measureNum);
+
+    // Optionally add a tempo text mark
+    if label != "" {
+      Staff staff;
+      staff = score.NthStaff(0);
+      if staff != null {
+        Bar bar;
+        bar = staff.NthBar(measureNum - 1);
+        if bar != null {
+          TextObject to;
+          to = score.NewTextObject("Tempo", label);
+          if to != null {
+            bar.AddBarObject(to, 0, staff);
+          }
+        }
+      }
+    }
+
+    return BuildResponse(cmdId, "ok", "Tempo set to " & bpm & " BPM at measure " & measureNum, "null");
+  } // DoSetTempo
+
+  // ─────────────────────────────────────────────────────────
+  // Tool: add_measures
+  // ─────────────────────────────────────────────────────────
+  string DoAddMeasures(string cmdId, string raw)
+  {
+    int count;
+    count = ExtractIntField(raw, "count");
+    if count <= 0 { count = 1; }
+    int afterMeasure;
+    afterMeasure = ExtractIntField(raw, "after_measure");
+    if afterMeasure <= 0 { afterMeasure = 1; }
+
+    Score score;
+    score = Sibelius.CurrentScore;
+    if score = null {
+      return BuildResponse(cmdId, "error", "No score open", "NO_SCORE");
+    }
+
+    score.AddBars(count, afterMeasure);
+
+    return BuildResponse(cmdId, "ok", count & " measure(s) added after measure " & afterMeasure, "null");
+  } // DoAddMeasures
+
+  // ─────────────────────────────────────────────────────────
+  // Tool: delete_notes
+  // ─────────────────────────────────────────────────────────
+  string DoDeleteNotes(string cmdId, string raw)
+  {
+    int startMeasure;
+    startMeasure = ExtractIntField(raw, "start_measure");
+    if startMeasure <= 0 { startMeasure = 1; }
+    int endMeasure;
+    endMeasure = ExtractIntField(raw, "end_measure");
+    if endMeasure <= 0 { endMeasure = startMeasure; }
+    int staffNum;
+    staffNum = ExtractIntField(raw, "staff");
+    if staffNum <= 0 { staffNum = 1; }
+
+    Score score;
+    score = Sibelius.CurrentScore;
+    if score = null {
+      return BuildResponse(cmdId, "error", "No score open", "NO_SCORE");
+    }
+
+    Staff staff;
+    staff = score.NthStaff(staffNum - 1);
+    if staff = null {
+      return BuildResponse(cmdId, "error", "Staff " & staffNum & " not found", "INVALID_STAFF");
+    }
+
+    Bar startBar;
+    startBar = staff.NthBar(startMeasure - 1);
+    Bar endBar;
+    endBar = staff.NthBar(endMeasure - 1);
+
+    if startBar = null or endBar = null {
+      return BuildResponse(cmdId, "error", "Invalid measure range", "INVALID_MEASURE");
+    }
+
+    score.Selection.SelectPassage(startBar, 0, endBar, 99999, staff, staff);
+    score.Selection.Delete();
+
+    return BuildResponse(cmdId, "ok", "Notes deleted from measure " & startMeasure & " to " & endMeasure, "null");
+  } // DoDeleteNotes
+
+  // ─────────────────────────────────────────────────────────
+  // Tool: get_score_info
+  // ─────────────────────────────────────────────────────────
+  string DoGetScoreInfo(string cmdId)
+  {
+    Score score;
+    score = Sibelius.CurrentScore;
+    if score = null {
+      return BuildResponse(cmdId, "error", "No score open", "NO_SCORE");
+    }
+
+    string title;
+    title = score.Title;
+    string composer;
+    composer = score.Composer;
+    int totalBars;
+    totalBars = score.SystemStaff.NthBar(0).BarNumber;  // placeholder
+    totalBars = score.NumBars;
+    int staffCount;
+    staffCount = score.NumStaves;
+
+    // Key signature: access from first bar of first staff
+    int keyIndex;
+    keyIndex = 0;
+    Staff firstStaff;
+    firstStaff = score.NthStaff(0);
+    if firstStaff != null {
+      Bar firstBar;
+      firstBar = firstStaff.NthBar(0);
+      if firstBar != null {
+        keyIndex = firstBar.KeySignature;
+      }
+    }
+
+    // Time signature from first bar
+    int timeNum;
+    timeNum = 4;
+    int timeDen;
+    timeDen = 4;
+    if firstStaff != null {
+      Bar firstBar;
+      firstBar = firstStaff.NthBar(0);
+      if firstBar != null {
+        timeNum = firstBar.TimeSignatureNumerator;
+        timeDen = firstBar.TimeSignatureDenominator;
+      }
+    }
+
+    // Build a richer response JSON manually
+    string msg;
+    msg = "{\"title\":\"" & title & "\","
+        & "\"composer\":\"" & composer & "\","
+        & "\"key\":" & keyIndex & ","
+        & "\"time_num\":" & timeNum & ","
+        & "\"time_den\":" & timeDen & ","
+        & "\"total_measures\":" & totalBars & ","
+        & "\"instrument_count\":" & staffCount & "}";
+
+    // We embed the data JSON in the message field (Python will re-parse)
+    string resp;
+    resp = "{\"cmd_id\":\"" & cmdId & "\","
+         & "\"status\":\"ok\","
+         & "\"message\":" & msg & ","
+         & "\"error_code\":null}";
+    return resp;
+  } // DoGetScoreInfo
+
+  // ─────────────────────────────────────────────────────────
+  // Tool: set_key_signature
+  // ─────────────────────────────────────────────────────────
+  string DoSetKeySignature(string cmdId, string raw)
+  {
+    string keyStr;
+    keyStr = ExtractStringField(raw, "key");
+    int measureNum;
+    measureNum = ExtractIntField(raw, "measure");
+    if measureNum <= 0 { measureNum = 1; }
+
+    int keyIndex;
+    keyIndex = KeyStringToIndex(keyStr);
+
+    int isMinor;
+    isMinor = 0;
+    if keyIndex >= 100 {
+      isMinor = 1;
+      keyIndex = keyIndex - 100;
+    } else if keyIndex <= -100 {
+      isMinor = 1;
+      keyIndex = keyIndex + 100;
+    }
+
+    Score score;
+    score = Sibelius.CurrentScore;
+    if score = null {
+      return BuildResponse(cmdId, "error", "No score open", "NO_SCORE");
+    }
+
+    if isMinor = 1 {
+      score.SetKeySignature(keyIndex, measureNum, True);
+    } else {
+      score.SetKeySignature(keyIndex, measureNum, False);
+    }
+
+    return BuildResponse(cmdId, "ok", "Key signature set to " & keyStr & " at measure " & measureNum, "null");
+  } // DoSetKeySignature
+
+  // ─────────────────────────────────────────────────────────
+  // Tool: set_time_signature
+  // ─────────────────────────────────────────────────────────
+  string DoSetTimeSignature(string cmdId, string raw)
+  {
+    int numerator;
+    numerator = ExtractIntField(raw, "numerator");
+    if numerator <= 0 { numerator = 4; }
+    int denominator;
+    denominator = ExtractIntField(raw, "denominator");
+    if denominator <= 0 { denominator = 4; }
+    int measureNum;
+    measureNum = ExtractIntField(raw, "measure");
+    if measureNum <= 0 { measureNum = 1; }
+
+    Score score;
+    score = Sibelius.CurrentScore;
+    if score = null {
+      return BuildResponse(cmdId, "error", "No score open", "NO_SCORE");
+    }
+
+    score.SetTimeSignature(numerator, denominator, measureNum);
+
+    return BuildResponse(cmdId, "ok", "Time signature set to " & numerator & "/" & denominator & " at measure " & measureNum, "null");
+  } // DoSetTimeSignature
+
+  // ─────────────────────────────────────────────────────────
+  // Tool: add_text
+  // ─────────────────────────────────────────────────────────
+  string DoAddText(string cmdId, string raw)
+  {
+    string textContent;
+    textContent = ExtractStringField(raw, "text");
+    string style;
+    style = ExtractStringField(raw, "style");
+    if style = "" { style = "Technique"; }
+    int measureNum;
+    measureNum = ExtractIntField(raw, "measure");
+    if measureNum <= 0 { measureNum = 1; }
+    int beatNum;
+    beatNum = ExtractIntField(raw, "beat");
+    if beatNum <= 0 { beatNum = 1; }
+    int staffNum;
+    staffNum = ExtractIntField(raw, "staff");
+    if staffNum <= 0 { staffNum = 1; }
+
+    Score score;
+    score = Sibelius.CurrentScore;
+    if score = null {
+      return BuildResponse(cmdId, "error", "No score open", "NO_SCORE");
+    }
+
+    Staff staff;
+    staff = score.NthStaff(staffNum - 1);
+    if staff = null {
+      return BuildResponse(cmdId, "error", "Staff " & staffNum & " not found", "INVALID_STAFF");
+    }
+
+    Bar bar;
+    bar = staff.NthBar(measureNum - 1);
+    if bar = null {
+      return BuildResponse(cmdId, "error", "Measure " & measureNum & " not found", "INVALID_MEASURE");
+    }
+
+    int position;
+    position = (beatNum - 1) * 256;
+
+    TextObject to;
+    to = score.NewTextObject(style, textContent);
+    if to = null {
+      return BuildResponse(cmdId, "error", "Could not create text object with style: " & style, "TEXT_FAILED");
+    }
+    bar.AddBarObject(to, position, staff);
+
+    return BuildResponse(cmdId, "ok", "Text \"" & textContent & "\" added at measure " & measureNum & " beat " & beatNum, "null");
+  } // DoAddText
+
+  // ─────────────────────────────────────────────────────────
+  // Tool: export_score (always defers to Python UI fallback)
+  // ─────────────────────────────────────────────────────────
+  string DoExportScore(string cmdId, string raw)
+  {
+    string format;
+    format = ExtractStringField(raw, "format");
+    if format = "" { format = "pdf"; }
+    string path;
+    path = ExtractStringField(raw, "path");
+
+    // ManuScript cannot reliably export; instruct Python to use UI fallback
+    string resp;
+    resp = "{\"cmd_id\":\"" & cmdId & "\","
+         & "\"status\":\"use_fallback\","
+         & "\"message\":\"Export cannot be performed from ManuScript. Use UI automation.\","
+         & "\"error_code\":null,"
+         & "\"format\":\"" & format & "\","
+         & "\"path\":\"" & path & "\"}";
+    return resp;
+  } // DoExportScore
+
+  // ─────────────────────────────────────────────────────────
+  // Tool: undo
+  // ─────────────────────────────────────────────────────────
+  string DoUndo(string cmdId, string raw)
+  {
+    int steps;
+    steps = ExtractIntField(raw, "steps");
+    if steps <= 0 { steps = 1; }
+
+    int i;
+    for i = 0 to steps - 1 {
+      Sibelius.Undo();
+    }
+
+    return BuildResponse(cmdId, "ok", "Undone " & steps & " step(s)", "null");
+  } // DoUndo
+
+  // ─────────────────────────────────────────────────────────
+  // Tool: select_passage
+  // ─────────────────────────────────────────────────────────
+  string DoSelectPassage(string cmdId, string raw)
+  {
+    int startMeasure;
+    startMeasure = ExtractIntField(raw, "start_measure");
+    if startMeasure <= 0 { startMeasure = 1; }
+    int endMeasure;
+    endMeasure = ExtractIntField(raw, "end_measure");
+    if endMeasure <= 0 { endMeasure = startMeasure; }
+    int startBeat;
+    startBeat = ExtractIntField(raw, "start_beat");
+    if startBeat <= 0 { startBeat = 1; }
+    int endBeat;
+    endBeat = ExtractIntField(raw, "end_beat");
+    if endBeat <= 0 { endBeat = 99; }
+    int staffNum;
+    staffNum = ExtractIntField(raw, "staff");
+    if staffNum <= 0 { staffNum = 1; }
+    string allStavesStr;
+    allStavesStr = ExtractStringField(raw, "all_staves");
+
+    Score score;
+    score = Sibelius.CurrentScore;
+    if score = null {
+      return BuildResponse(cmdId, "error", "No score open", "NO_SCORE");
+    }
+
+    Staff startStaff;
+    startStaff = score.NthStaff(staffNum - 1);
+    if startStaff = null {
+      return BuildResponse(cmdId, "error", "Staff not found", "INVALID_STAFF");
+    }
+
+    Staff endStaff;
+    if allStavesStr = "true" {
+      endStaff = score.NthStaff(score.NumStaves - 1);
+    } else {
+      endStaff = startStaff;
+    }
+
+    Bar startBar;
+    startBar = startStaff.NthBar(startMeasure - 1);
+    Bar endBar;
+    endBar = startStaff.NthBar(endMeasure - 1);
+
+    if startBar = null or endBar = null {
+      return BuildResponse(cmdId, "error", "Invalid measure range", "INVALID_MEASURE");
+    }
+
+    int startPos;
+    startPos = (startBeat - 1) * 256;
+    int endPos;
+    endPos = (endBeat - 1) * 256;
+    if endBeat >= 99 { endPos = 99999; }
+
+    score.Selection.SelectPassage(startBar, startPos, endBar, endPos, startStaff, endStaff);
+
+    return BuildResponse(cmdId, "ok", "Passage selected: measures " & startMeasure & "-" & endMeasure, "null");
+  } // DoSelectPassage
+
+  // ─────────────────────────────────────────────────────────
+  // Tool: transpose_passage
+  // ─────────────────────────────────────────────────────────
+  string DoTransposePassage(string cmdId, string raw)
+  {
+    string intervalStr;
+    intervalStr = ExtractStringField(raw, "interval");
+    int startMeasure;
+    startMeasure = ExtractIntField(raw, "start_measure");
+    if startMeasure <= 0 { startMeasure = 1; }
+    int endMeasure;
+    endMeasure = ExtractIntField(raw, "end_measure");
+    if endMeasure <= 0 { endMeasure = startMeasure; }
+    int staffNum;
+    staffNum = ExtractIntField(raw, "staff");
+    if staffNum <= 0 { staffNum = 1; }
+    string allStavesStr;
+    allStavesStr = ExtractStringField(raw, "all_staves");
+
+    int semitones;
+    semitones = IntervalSemitones(intervalStr);
+
+    Score score;
+    score = Sibelius.CurrentScore;
+    if score = null {
+      return BuildResponse(cmdId, "error", "No score open", "NO_SCORE");
+    }
+
+    Staff startStaff;
+    startStaff = score.NthStaff(staffNum - 1);
+    if startStaff = null {
+      return BuildResponse(cmdId, "error", "Staff not found", "INVALID_STAFF");
+    }
+
+    Staff endStaff;
+    if allStavesStr = "true" {
+      endStaff = score.NthStaff(score.NumStaves - 1);
+    } else {
+      endStaff = startStaff;
+    }
+
+    Bar startBar;
+    startBar = startStaff.NthBar(startMeasure - 1);
+    Bar endBar;
+    endBar = startStaff.NthBar(endMeasure - 1);
+
+    if startBar = null or endBar = null {
+      return BuildResponse(cmdId, "error", "Invalid measure range", "INVALID_MEASURE");
+    }
+
+    score.Selection.SelectPassage(startBar, 0, endBar, 99999, startStaff, endStaff);
+    score.Selection.Transpose(semitones);
+
+    return BuildResponse(cmdId, "ok", "Passage transposed by " & intervalStr & " (" & semitones & " semitones)", "null");
+  } // DoTransposePassage
+
+} // VoiceAgentBridge
