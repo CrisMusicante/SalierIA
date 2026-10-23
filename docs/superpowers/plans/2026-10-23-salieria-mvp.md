@@ -282,7 +282,7 @@ def test_unknown_instrument_asks(snap):
   - "Un tono" = `{2, major, up}`.
   - `to_manuscript(interval) -> tuple[int, int]` returns (degree = `±(number-1)`, interval type).
   - Interval-type values: Perfect/Major = 5, Minor/Diminished = 4, Augmented = 6.
-- Tools: there are 18 in all, one per operation in spec §3.1, plus undo, correction and asking.
+- Tools: there are 20 in all, one per operation in spec §3.1, plus undo, correction and asking.
   - `add_bars(count, after_bar)`, `delete_bars(start_bar, end_bar)`.
   - `set_time_signature(bar, num, den)`, `set_key_signature(bar, key, mode)`, `set_tempo(bar, bpm, text?)`.
   - `set_durations(target, start, end, durations: list[{figure, dots}])`.
@@ -290,7 +290,7 @@ def test_unknown_instrument_asks(snap):
   - `copy_passage(target, start, end, dest_target, dest_start, retrograde: bool, transpose: Interval|null)`. This one tool covers the §3.3 compound case.
   - `transpose_passage(target, start, end, interval)`, `retrograde_passage(target, start, end)`.
   - `add_dynamic(target, at, text: "ppp".."fff"|"sfz"|"fp")`, `add_hairpin(target, start, end, kind: "cresc"|"dim")`.
-  - `add_slur(target, start, end)`, `add_articulation(target, start, end, name: "staccato"|"staccatissimo"|"tenuto"|"accent"|"marcato"|"wedge")`.
+  - `add_slur(target, start, end, kind: "slur"|"tie")` ("ligaduras" covers both; a tie sets `Note.Tied` on each note in the span except the last), `add_articulation(target, start, end, name: "staccato"|"staccatissimo"|"tenuto"|"accent"|"marcato"|"wedge")`.
   - `add_instrument(name)`, `change_instrument(target, at_bar, new_instrument)`.
   - `undo_last()`.
   - `replace_last(calls: list[tool call])` for "no, era el compás 16".
@@ -345,7 +345,7 @@ def test_unknown_instrument_asks(snap):
     - `run(prims) -> Response`: atomic write (tmp + `os.replace`), delete any old response first, call `trigger()`, poll every 50 ms. Timeout raises `SibeliusTimeout`. `ok=False` raises `SibeliusError(message)`.
     - `undo(steps: int)`: sends Ctrl+Z `steps` times via the trigger's window helper.
   - `class HotkeyTrigger(title_re=".*Sibelius.*", keys="^%+s")`, a pywinauto implementation. It is not unit-tested; Task 0 proved it.
-- Bridge dir: `%LOCALAPPDATA%\SalierIA\bridge`. The plugin has this path hardcoded and gets it from `Sibelius.GetUserApplicationDataFolder`/... if that exists in 8.2; otherwise `C:\Temp\salieri`. **Confirm in Task 0 and use the same constant in both places.**
+- Bridge dir: `C:\Temp\salieri\`, hardcoded as the same constant in the plugin and in `src/bridge/protocol.py` (`BRIDGE_DIR`). ManuScript cannot read environment variables. Task 0 confirms that the plugin can read and write there.
 
 - [ ] **Step 1: Write the failing tests.**
   - Round-trip `encode_command`, and `decode_response` on the fixture files `tests/fixtures/protocol/score_info_resp.txt` and `read_resp.txt` (write these fixtures by hand from the format above).
@@ -502,7 +502,7 @@ def test_reference_example_announcement():
     - `input_device: str | None = None` and `input_channel=1` (1-based, the voice on Scarlett ch 1);
     - `output_device: str | None = None`;
     - `asr="faster-whisper"`, `asr_model="small"`;
-    - `wake_word="salieri"`, `bridge_dir=<constant from Task 6>`.
+    - `wake_word="salieri"`, `bridge_dir=BRIDGE_DIR` (Task 6).
   - `load_preferences(path: Path = default_path()) -> Preferences`: a missing file writes the defaults and returns them, and unknown keys are ignored. An invalid `mode`/`provider`, or `input_channel < 1`, raises `ValueError` with the field name.
   - `save_preferences(p, path)`.
   - `default_path() -> Path` = `%APPDATA%\SalierIA\preferences.json`.
@@ -646,6 +646,7 @@ def test_reference_example_announcement():
 
 **Files:**
 - Modify: `src/voice/transcribe.py` (rewrite)
+- Create: `tools/measure_asr.py` (times `transcribe()` over the WAVs in a folder per model size)
 - Test: `tests/voice/test_transcribe.py`
 
 **Interfaces:**
